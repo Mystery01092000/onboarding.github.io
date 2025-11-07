@@ -1,0 +1,39 @@
+/* Readability and layout tweaks */
+:root {
+  --content-max-width: 900px;
+}
+
+body {
+  line-height: 1.6;
+}
+
+.page-content,
+.wrapper,
+main {
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+h1, h2, h3 {
+  font-weight: 600;
+}
+
+code, pre code {
+  font-size: 0.95em;
+}
+
+/* Mermaid container is responsive and scrollable when wide */
+.mermaid {
+  width: 100%;
+  overflow: auto;
+}
+
+/* Improve contrast of links on light themes */
+a { color: #0366d6; }
+a:hover { text-decoration: underline; }
+
+/* Tables */
+table { width: 100%; border-collapse: collapse; }
+th, td { border: 1px solid #eaecef; padding: 8px; }
+th { background: #f6f8fa; }
