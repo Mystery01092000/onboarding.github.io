@@ -2,16 +2,17 @@
 
 ## Index
 
-1. [Executive Summary](#executive-summary)
+1. [Summary](#summary)
 2. [System Architecture Overview](#system-architecture-overview)
 3. [Codebase Structure](#codebase-structure)
 4. [API Routes and Definitions](#api-routes-and-definitions)
 5. [Database Design and Schema](#database-design-and-schema)
-6. [Third-Party Integration Layer](#third-party-integration-layer)
-7. [Infrastructure and Deployment](#infrastructure-and-deployment)
-8. [Configuration Management](#configuration-management)
-9. [Setup and Environment](#setup-and-environment)
-10. [Monitoring and Observability](#monitoring-and-observability)
+6. [Global Config Initialization with Secrets](global-config-initialization-with-secrets)
+7. [Third-Party Integration Layer](#third-party-integration-layer)
+8. [Infrastructure and Deployment](#infrastructure-and-deployment)
+9. [Configuration Management](#configuration-management)
+10. [Setup and Environment](#setup-and-environment)
+11. [Monitoring and Observability](#monitoring-and-observability)
 
 ---
 
@@ -66,11 +67,17 @@ graph TB
         FACE[Face Match]
         GEO[Geolocation]
     end
-    
+
+    subgraph "Other Services"
+        UNAUTH[OneDigital]
+    end
+
     WEB --> GATEWAY
     MOB --> GATEWAY
     API_CLIENT --> GATEWAY
-    
+
+    UNAUTH --> ORC
+
     GATEWAY --> AUTH
     GATEWAY --> ORC
     
@@ -90,7 +97,7 @@ graph TB
     INTEGRATION --> AOF
     INTEGRATION --> FACE
     INTEGRATION --> GEO
-    
+
     ORC --> BLOB
 ```
 
@@ -229,6 +236,37 @@ https://api.onboarding.service/v1
 
 ### 1. Onboarding Journey APIs
 
+#### User Onboarding Check
+```typescript
+GET /onboarding/
+Headers: {
+  "Authorization": "Bearer {token}",
+  "X-Client-Id": "{clientId}",
+  "X-Journey-Type": "{journeyType}"
+}
+
+Response: {
+    "exists" : "TRUE | FALSE",
+    "status" : "STARTED | IN_PROGRESS | COMPLETED | PAUSED | FAILED",
+    "metadata" : {
+        "journeyType" : "MUTUAL_FUNDS | BROKING | INSURANCE | GENERAL",
+        "journeyId" : "string",
+        "currentStep" : "number",
+        "totalSteps" : "number",
+         "steps": [
+            {
+              "stepId": "string",
+              "stepKey": "string",
+              "order": "number",
+              "status": "PENDING | IN_PROGRESS | COMPLETED",
+              "mandatory": "boolean"
+            }
+        ]
+    }
+  }
+```
+
+
 #### Initialize Onboarding
 ```typescript
 POST /onboarding/initialize
@@ -264,128 +302,12 @@ Response: {
 }
 ```
 
-#### Get Current Journey Status
-```typescript
-GET /onboarding/journey/{journeyId}/status
-Response: {
-  "journeyId": "string",
-  "status": "STARTED | IN_PROGRESS | COMPLETED | PAUSED | FAILED",
-  "currentStep": {
-    "stepId": "string",
-    "stepKey": "string",
-    "order": "number"
-  },
-  "completedSteps": ["string"],
-  "remainingSteps": ["string"],
-  "progressPercentage": "number"
-}
-```
 
-#### Execute Step
-```typescript
-POST /onboarding/journey/{journeyId}/step/{stepId}/execute
-Body: {
-  "stepData": "object", // Dynamic based on step type
-  "validationData": "object"
-}
-Response: {
-  "success": "boolean",
-  "stepResult": {
-    "stepId": "string",
-    "status": "COMPLETED | FAILED | PENDING_VALIDATION",
-    "validationErrors": ["string"],
-    "nextStep": "string | null"
-  }
-}
-```
-
-### 2. Progress Management APIs
-
-#### Resume Journey
-```typescript
-POST /progress/resume
-Body: {
-  "userId": "string",
-  "journeyId": "string"
-}
-Response: {
-  "journeyId": "string",
-  "resumedFromStep": {
-    "stepId": "string",
-    "stepKey": "string",
-    "order": "number"
-  },
-  "journeyData": "object"
-}
-```
-
-#### Save Progress
-```typescript
-PUT /progress/save
-Body: {
-  "journeyId": "string",
-  "currentStep": "string",
-  "completedSteps": ["string"],
-  "partialData": "object"
-}
-```
-
-#### Get User Progress
-```typescript
-GET /progress/user/{userId}
-Response: {
-  "activeJourneys": [
-    {
-      "journeyId": "string",
-      "journeyType": "string",
-      "status": "string",
-      "lastUpdated": "datetime"
-    }
-  ],
-  "completedJourneys": ["object"]
-}
-```
-
-### 3. Configuration Management APIs
-
-#### Get Journey Configuration
-```typescript
-GET /config/journey/{journeyType}
-Response: {
-  "journeyType": "string",
-  "version": "string",
-  "steps": [
-    {
-      "stepKey": "string",
-      "order": "number",
-      "config": {
-        "validations": ["object"],
-        "integrations": ["string"],
-        "uiConfig": "object"
-      }
-    }
-  ]
-}
-```
-
-#### Update Journey Configuration (Admin)
-```typescript
-PUT /config/journey/{journeyType}
-Headers: {
-  "X-Admin-Token": "{adminToken}"
-}
-Body: {
-  "version": "string",
-  "steps": ["object"],
-  "metadata": "object"
-}
-```
-
-### 4. Integration APIs
+### 2. Integration APIs
 
 #### Trigger KYC Verification
 ```typescript
-POST /integration/kyc/verify
+POST /integration/pan/verify
 Body: {
   "journeyId": "string",
   "pan": "string",
@@ -681,6 +603,205 @@ TTL: 1800 seconds
 ```
 
 ---
+## Global Config Initialization with Secrets (Onboarding Service)
+
+### Overview
+This document describes how to initialize and store configuration globally at application startup.  
+Instead of calling **Azure Key Vault** repeatedly, the application:
+1. Loads configuration once at startup.  
+2. Fetches all secrets from Azure Key Vault.  
+3. Merges secrets into the global config object.  
+4. Exposes a global `CONFIG` variable accessible across the service.
+
+---
+
+### Folder Structure
+```bash
+src/
+ ├── core/
+ │   ├── config/
+ │   │   ├── global.config.ts          # Static config definitions
+ │   │   ├── keyvault.service.ts       # Fetch secrets from Azure Key Vault
+ │   │   ├── config.loader.ts          # Loads and merges secrets into config
+ │   │   └── index.ts                  # Exports global config
+ │   └── app.ts                        # Initializes config and starts app
+```
+
+---
+
+### global.config.ts
+Base configuration containing non-sensitive data.  
+Secrets are referenced with placeholders (`KEYVAULT::SECRET_NAME`).
+
+```ts
+export const GLOBAL_CONFIG = {
+  BROKING: {
+    Digilocker: {
+      baseUrl: "https://api.digilocker.com",
+      endpoints: {
+        validate: "/validate",
+        fetchDocument: "/fetch-document",
+      },
+      clientSecrets: "KEYVAULT::DIGILOCKER_SECRET_BROKING",
+      clientUsername: "KEYVAULT::DIGILOCKER_USERNAME_BROKING",
+    },
+    CVLKRA: {
+      baseUrl: "https://api.cvlkra.com",
+      endpoints: {
+        kycStatus: "/get-status",
+        fetchKyc: "/fetch-kyc",
+      },
+      clientSecrets: "KEYVAULT::CVLKRA_SECRET_BROKING",
+    },
+  },
+  WEALTH: {
+    Digilocker: {
+      baseUrl: "https://api.digilocker.com",
+      endpoints: {
+        validate: "/v2/validate",
+        fetchDocument: "/v2/fetch-document",
+      },
+      clientSecrets: "KEYVAULT::DIGILOCKER_SECRET_WEALTH",
+      clientUsername: "KEYVAULT::DIGILOCKER_USERNAME_WEALTH",
+    },
+  },
+};
+```
+
+---
+
+### keyvault.service.ts
+Responsible for securely fetching secrets from **Azure Key Vault** once.
+
+```ts
+import { SecretClient } from "@azure/keyvault-secrets";
+import { DefaultAzureCredential } from "@azure/identity";
+
+const keyVaultUrl = process.env.AZURE_KEY_VAULT_URL || "";
+const credential = new DefaultAzureCredential();
+const client = new SecretClient(keyVaultUrl, credential);
+
+export class KeyVaultService {
+  static async getSecret(secretName: string): Promise<string | null> {
+    try {
+      const secret = await client.getSecret(secretName);
+      return secret.value || null;
+    } catch (error) {
+      console.error(`[KeyVaultService] Error fetching secret ${secretName}:`, error);
+      return null;
+    }
+  }
+}
+```
+
+---
+
+### config.loader.ts
+Loads and merges secrets into config once during application startup.
+
+```ts
+import { GLOBAL_CONFIG } from "./global.config";
+import { KeyVaultService } from "./keyvault.service";
+
+export class ConfigLoader {
+  static async initializeGlobalConfig() {
+    const resolvedConfig: any = JSON.parse(JSON.stringify(GLOBAL_CONFIG));
+
+    const traverseAndResolve = async (obj: any) => {
+      for (const key in obj) {
+        if (typeof obj[key] === "object") {
+          await traverseAndResolve(obj[key]);
+        } else if (typeof obj[key] === "string" && obj[key].startsWith("KEYVAULT::")) {
+          const secretName = obj[key].replace("KEYVAULT::", "");
+          const secretValue = await KeyVaultService.getSecret(secretName);
+          obj[key] = secretValue || "";
+        }
+      }
+    };
+
+    await traverseAndResolve(resolvedConfig);
+    console.log("[ConfigLoader] ✅ Global configuration initialized successfully.");
+    return resolvedConfig;
+  }
+}
+```
+
+---
+
+### index.ts
+Exports global config after initialization.
+
+```ts
+import { ConfigLoader } from "./config.loader";
+
+export let CONFIG: any = {};
+
+export const initializeConfig = async () => {
+  CONFIG = await ConfigLoader.initializeGlobalConfig();
+};
+```
+
+---
+
+### app.ts (Application Entry)
+Initializes config before starting server.
+
+```ts
+import express from "express";
+import { initializeConfig, CONFIG } from "./core/config";
+
+const app = express();
+
+(async () => {
+  console.log("[App] Initializing configuration...");
+  await initializeConfig();
+
+  console.log("[App] Starting server...");
+  console.log("Global Config Ready For Use: ", Object.keys(CONFIG));
+
+  app.get("/config/:source", (req, res) => {
+    const { source } = req.params;
+    const config = CONFIG[source.toUpperCase()];
+    if (!config) return res.status(404).json({ error: "Invalid source" });
+    res.json(config);
+  });
+
+  app.listen(3000, () => console.log("🚀 Server running on port 3000"));
+})();
+```
+
+---
+
+### Example Usage
+Access config anywhere in code without re-fetching.
+
+```ts
+import { CONFIG } from "../core/config";
+
+export class DigiLockerAdapter {
+  static async validate() {
+    const { baseUrl, endpoints, clientUsername, clientSecrets } = CONFIG.BROKING.Digilocker;
+    console.log("Using Digilocker config: ", baseUrl, clientUsername);
+    // perform API request...
+  }
+}
+```
+
+---
+
+### Working Flow
+```mermaid
+sequenceDiagram
+    participant App as App Startup
+    participant KeyVault as Azure Key Vault
+    participant ConfigLoader as ConfigLoader
+    participant Global as Global CONFIG Object
+    App->>ConfigLoader: Initialize Global Config
+    ConfigLoader->>KeyVault: Fetch all required secrets
+    KeyVault-->>ConfigLoader: Return secret values
+    ConfigLoader->>Global: Merge secrets into global config
+    Global-->>App: CONFIG object ready for all services
+```
 
 ## Third-Party Integration Layer
 
@@ -766,220 +887,6 @@ export interface IntegrationResponse {
   };
 }
 ```
-
-### Sample Adapter Implementation
-
-```typescript
-// digilocker.adapter.ts
-import { IIntegrationAdapter, IntegrationRequest, IntegrationResponse } from '../interfaces/integration.interface';
-import axios, { AxiosInstance } from 'axios';
-import { Logger } from '../../utils/logger';
-import { encrypt, decrypt } from '../../utils/encryption';
-
-export class DigiLockerAdapter implements IIntegrationAdapter {
-  serviceName = 'DIGILOCKER';
-  version = '1.0.0';
-  private client: AxiosInstance;
-  private config: any;
-  private logger: Logger;
-
-  async initialize(config: IntegrationConfig): Promise<void> {
-    this.config = config;
-    this.logger = new Logger('DigiLockerAdapter');
-    
-    this.client = axios.create({
-      baseURL: config.baseUrl,
-      timeout: config.timeout || 30000,
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Service-Version': this.version
-      }
-    });
-
-    // Setup interceptors for auth
-    this.setupInterceptors();
-  }
-
-  async execute(request: IntegrationRequest): Promise<IntegrationResponse> {
-    const startTime = Date.now();
-    const requestId = this.generateRequestId();
-
-    try {
-      // Authenticate if needed
-      const token = await this.authenticate();
-      
-      // Make the actual API call
-      const response = await this.client.post(
-        this.config.endpoints.verify,
-        {
-          pan: request.data.pan,
-          aadhaar: request.data.aadhaar,
-          consent: request.data.consentToken
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'X-Request-ID': requestId
-          }
-        }
-      );
-
-      return {
-        success: true,
-        data: response.data,
-        metadata: {
-          requestId,
-          timestamp: new Date(),
-          duration: Date.now() - startTime
-        }
-      };
-    } catch (error) {
-      this.logger.error('DigiLocker API call failed', error);
-      
-      return {
-        success: false,
-        error: {
-          code: 'DIGILOCKER_ERROR',
-          message: error.message,
-          details: error.response?.data
-        },
-        metadata: {
-          requestId,
-          timestamp: new Date(),
-          duration: Date.now() - startTime
-        }
-      };
-    }
-  }
-
-  async validate(data: any): ValidationResult {
-    const errors = [];
-
-    if (!data.pan || !this.isValidPAN(data.pan)) {
-      errors.push({
-        field: 'pan',
-        message: 'Invalid PAN format'
-      });
-    }
-
-    if (!data.aadhaar || !this.isValidAadhaar(data.aadhaar)) {
-      errors.push({
-        field: 'aadhaar',
-        message: 'Invalid Aadhaar number'
-      });
-    }
-
-    if (!data.consentToken) {
-      errors.push({
-        field: 'consentToken',
-        message: 'Consent token is required'
-      });
-    }
-
-    return {
-      valid: errors.length === 0,
-      errors
-    };
-  }
-
-  async healthCheck(): Promise<HealthStatus> {
-    try {
-      const response = await this.client.get(this.config.healthCheckUrl);
-      return {
-        healthy: response.status === 200,
-        message: 'Service is operational',
-        lastChecked: new Date()
-      };
-    } catch (error) {
-      return {
-        healthy: false,
-        message: `Health check failed: ${error.message}`,
-        lastChecked: new Date()
-      };
-    }
-  }
-
-  getMockResponse(scenario: string): any {
-    const mockResponses = {
-      'success': {
-        verified: true,
-        name: 'John Doe',
-        pan: 'ABCDE1234F',
-        aadhaar: '****-****-1234'
-      },
-      'failure': {
-        verified: false,
-        reason: 'PAN and Aadhaar mismatch'
-      },
-      'timeout': null
-    };
-
-    return mockResponses[scenario] || mockResponses['success'];
-  }
-
-  private async authenticate(): Promise<string> {
-    // OAuth2 authentication logic
-    const response = await this.client.post(
-      this.config.endpoints.authenticate,
-      {
-        client_id: decrypt(this.config.auth.clientId),
-        client_secret: decrypt(this.config.auth.clientSecret),
-        grant_type: 'client_credentials'
-      }
-    );
-
-    return response.data.access_token;
-  }
-
-  private setupInterceptors(): void {
-    // Request interceptor for logging
-    this.client.interceptors.request.use(
-      (config) => {
-        this.logger.info(`Outgoing request to ${config.url}`);
-        return config;
-      },
-      (error) => {
-        this.logger.error('Request interceptor error', error);
-        return Promise.reject(error);
-      }
-    );
-
-    // Response interceptor for retry logic
-    this.client.interceptors.response.use(
-      (response) => response,
-      async (error) => {
-        const originalRequest = error.config;
-        
-        if (error.response?.status === 429 && !originalRequest._retry) {
-          originalRequest._retry = true;
-          await this.delay(this.config.retryConfig.retryDelay);
-          return this.client(originalRequest);
-        }
-        
-        return Promise.reject(error);
-      }
-    );
-  }
-
-  private isValidPAN(pan: string): boolean {
-    return /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/.test(pan);
-  }
-
-  private isValidAadhaar(aadhaar: string): boolean {
-    return /^\d{12}$/.test(aadhaar.replace(/\s/g, ''));
-  }
-
-  private generateRequestId(): string {
-    return `${this.serviceName}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  }
-
-  private delay(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-}
-```
-
----
 
 ## Infrastructure and Deployment
 
@@ -2270,7 +2177,6 @@ export class Logger {
 - JWT-based authentication with refresh tokens
 - Role-based access control (RBAC)
 - API key management for service-to-service communication
-- OAuth2 integration for third-party services
 
 ### 2. Data Protection
 - Encryption at rest for sensitive data
